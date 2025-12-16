@@ -1,0 +1,25 @@
+
+# C/C++ build outputs
+build/
+CMakeFiles/
+CMakeCache.txt
+*.obj
+*.o
+*.exe
+*.out
+*.log
+*.a
+*.lib
+*.dll
+*.pdb
+*.zip
+
+# VS / IDE
+.vs/
+*.user
+*.suo
+*.vcxproj*
+
+# OS
+.DS_Store
+Thumbs.db

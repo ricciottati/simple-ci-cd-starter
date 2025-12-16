@@ -1,0 +1,84 @@
+
+name: Deploy (WinRM HTTPS)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+env:
+  ARTIFACT_NAME: app-windows-${{ github.ref_name }}.zip
+
+jobs:
+  build-artifact:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure CMake
+        shell: pwsh
+        run: |
+          choco install cmake --no-progress --installargs 'ADD_CMAKE_TO_PATH=System' -y
+          choco install ninja --no-progress -y
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+      - name: Package (zip)
+        shell: pwsh
+        run: |
+          $out = Join-Path "build" "Release"
+          $zip = "${{ env.ARTIFACT_NAME }}"
+          Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zip -Force
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_NAME }}
+  deploy:
+    needs: build-artifact
+    runs-on: windows-latest
+    environment:
+      name: production
+      url: ${{ vars.PROD_APP_URL }}
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: dist
+      - name: Deploy via WinRM (HTTPS)
+        shell: pwsh
+        env:
+          HOST:        ${{ vars.PROD_HOST }}
+          DEST:        ${{ vars.PROD_DEPLOY_PATH }}
+          SERVICE:     ${{ vars.PROD_SERVICE_NAME }}
+          USERNAME:    ${{ secrets.PROD_USERNAME }}
+          PASSWORD:    ${{ secrets.PROD_PASSWORD }}
+          ZIPNAME:     ${{ env.ARTIFACT_NAME }}
+        run: |
+          $secure = ConvertTo-SecureString $env:PASSWORD -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential ($env:USERNAME, $secure)
+          $sess = New-PSSession -ComputerName $env:HOST -Credential $cred -Authentication Negotiate -UseSSL
+          $localZip = Join-Path "dist" $env:ZIPNAME
+          $remoteZip = Join-Path $env:DEST $env:ZIPNAME
+          Copy-Item -Path $localZip -Destination $remoteZip -ToSession $sess -Force
+          Invoke-Command -Session $sess -ScriptBlock {
+            param($dest, $zip, $service)
+            if ($service) { Stop-Service -Name $service -Force -ErrorAction SilentlyContinue }
+            $zipPath = Join-Path $dest $zip
+            $tmp = Join-Path $dest "tmp-deploy"
+            $cur = Join-Path $dest "current"
+            $bak = Join-Path $dest ("backup-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+            if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+            Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
+            if (Test-Path $cur) { Move-Item -Path $cur -Destination $bak }
+            Move-Item -Path $tmp -Destination $cur
+            if ($service) { Start-Service -Name $service }
+          } -ArgumentList $env:DEST, $env:ZIPNAME, $env:SERVICE
+          Remove-PSSession $sess
